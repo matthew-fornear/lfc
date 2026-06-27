@@ -1,0 +1,7 @@
+curl_cffi>=0.6.0
+datadome-encryption  # installed editable from datadome-encryption-python/
+numpy
+pillow
+beautifulsoup4
+opencv-python
+requests

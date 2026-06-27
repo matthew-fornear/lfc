@@ -1,0 +1,6 @@
+node_modules/
+captures/
+**/output/
+*.pyc
+__pycache__/
+.env

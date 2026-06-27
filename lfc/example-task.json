@@ -1,0 +1,15 @@
+{
+  "refresh_seconds": 1800,
+  "inter_game_pause_seconds": 3,
+  "auto_discover_events": true,
+  "event_category": "home-tickets",
+  "price_type_name": "Adult",
+  "price_level_name": "Tier 1",
+  "prefer_areas": [],
+  "discord_webhook": null,
+  "discord_bot_token": null,
+  "discord_channel_id": null,
+  "lfc_email": "",
+  "lfc_password": "",
+  "open_browser_on_cart": true
+}

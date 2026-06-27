@@ -1,0 +1,3 @@
+# Optional: only needed for interactive gateway bot (discord/bot.py).
+# Channel posts from the monitor use the REST API (stdlib only).
+discord.py>=2.3.0
