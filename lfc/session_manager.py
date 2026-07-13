@@ -16,6 +16,7 @@ from lfc.session import (
     session_diagnostics,
 )
 from lfc.datadome_challenge import (
+    is_datadome_hard_block,
     is_datadome_verification_page,
     try_solve_datadome_challenge,
 )
@@ -256,6 +257,11 @@ def http_restore_session(
 
 
 def _datadome_blocking(html: str, url: str = "") -> bool:
+    # Empty dd_referrer redirects are DataDome mid-challenge, not a real page.
+    if "dd_referrer" in (url or "").lower():
+        return True
+    if is_datadome_hard_block(html, url):
+        return True
     if is_datadome_verification_page(html):
         return True
     if "productId" in html or "Select tickets" in html:
@@ -270,33 +276,73 @@ def _datadome_blocking(html: str, url: str = "") -> bool:
     return "var dd=" in html and ("please enable" in low or len(html) < 10000)
 
 
-def _page_has_session(html: str, url: str, jar: dict[str, str] | None = None) -> bool:
+def _page_looks_hard_blocked(page) -> bool:
+    try:
+        return is_datadome_hard_block(page.content(), page.url)
+    except Exception:
+        return False
+
+
+def _clear_datadome_cookies(context) -> None:
+    """Drop poisoned DataDome cookies from the persistent profile."""
+    try:
+        jars = context.cookies()
+    except Exception:
+        return
+    keep = [
+        c
+        for c in jars
+        if c.get("name", "").lower() not in ("datadome", "dd_cookie")
+    ]
+    try:
+        context.clear_cookies()
+        if keep:
+            context.add_cookies(keep)
+    except Exception:
+        pass
+
+
+def _page_has_session(
+    html: str,
+    url: str,
+    jar: dict[str, str] | None = None,
+    *,
+    allow_category: bool = False,
+) -> bool:
+    """True when cookies are usable and page is a real authenticated landing.
+
+    Category home-tickets alone is normally NOT enough (DataDome often lands
+    there mid-challenge). allow_category=True only after a finished OAuth when
+    the acquire target itself was the category bootstrap URL.
+    """
     if "Errors.aspx" in url:
+        return False
+    if "dd_referrer" in url.lower():
         return False
     if "profile.liverpoolfc.com" in url and "sign-in" in url:
         return False
     if _datadome_blocking(html, url):
         return False
-    if jar and session_cookies_usable(jar)[0]:
-        if "productId" in html or "Select tickets" in html:
-            return True
-        if "/categories/" in url or "home-tickets" in url:
-            return len(html) > 8_000
-    if "productId" in html:
+    if not jar or not session_cookies_usable(jar)[0]:
+        return False
+    if "productId" in html or "Select tickets" in html:
         return True
-    if "Select tickets" in html:
+    path = urllib.parse.urlparse(url).path.lower()
+    if "/events/" in path and len(html) > 30_000:
+        return True
+    if allow_category and "/categories/" in path and len(html) > 8_000:
         return True
     return False
 
 
-def _browser_session_ready(context, page) -> bool:
+def _browser_session_ready(context, page, *, allow_category: bool = False) -> bool:
     try:
         jar = {c["name"]: c["value"] for c in context.cookies()}
         url = page.url
         html = page.content()
     except Exception:
         return False
-    return _page_has_session(html, url, jar)
+    return _page_has_session(html, url, jar, allow_category=allow_category)
 
 
 def _dismiss_cookie_banner(page) -> bool:
@@ -468,18 +514,24 @@ def _browser_goto(page, url: str, *, timeout: int = 60_000) -> None:
     page.wait_for_timeout(400)
 
 
-def _wait_browser_session_ready(context, page, timeout_sec: float = 45.0) -> bool:
+def _wait_browser_session_ready(
+    context,
+    page,
+    timeout_sec: float = 45.0,
+    *,
+    allow_category: bool = False,
+) -> bool:
     """Poll until ticketing session cookies + page look valid."""
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
-        if _browser_session_ready(context, page):
+        if _browser_session_ready(context, page, allow_category=allow_category):
             return True
         try:
             page.wait_for_load_state("domcontentloaded", timeout=2000)
         except Exception:
             pass
         page.wait_for_timeout(500)
-    return _browser_session_ready(context, page)
+    return _browser_session_ready(context, page, allow_category=allow_category)
 
 
 def _wait_past_datadome(page, deadline: float) -> bool:
@@ -489,13 +541,23 @@ def _wait_past_datadome(page, deadline: float) -> bool:
         except Exception:
             pass
         try:
+            url = page.url
             html = page.content()
         except Exception:
             page.wait_for_timeout(1500)
             continue
-        if not _datadome_blocking(html, page.url) and len(html) > 30_000:
+        if "dd_referrer" in url.lower():
+            # DataDome bounce loop — nudge back to clean home URL once.
+            try:
+                if page.url != HOME_URL:
+                    _browser_goto(page, HOME_URL)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+            continue
+        if not _datadome_blocking(html, url) and len(html) > 30_000:
             return True
-        if _datadome_blocking(html, page.url):
+        if _datadome_blocking(html, url):
             try_solve_datadome_challenge(page)
         page.wait_for_timeout(2500)
     return False
@@ -543,6 +605,18 @@ def _playwright_visit(
 
         print("[session] Browser -> home-tickets (DataDome bootstrap)...")
         _browser_goto(page, HOME_URL)
+        if _page_looks_hard_blocked(page):
+            print("[session] DataDome hard-block on home — clearing datadome cookie and retrying once")
+            _clear_datadome_cookies(context)
+            page.wait_for_timeout(800)
+            _browser_goto(page, HOME_URL)
+        if _page_looks_hard_blocked(page):
+            context.close()
+            return {}, (
+                "DataDome hard-block (HTTP 406 / access restricted). "
+                "Wipe .lfc/accounts/<bot>/browser_profile (+ session.json), clear liverpoolfc.com "
+                "cookies in Brave, wait a bit, then retry. Your IP may be flagged."
+            )
         if not _wait_past_datadome(page, time.time() + DATADOME_BOOTSTRAP_SEC):
             context.close()
             return {}, "DataDome challenge did not clear on home-tickets"
@@ -554,18 +628,85 @@ def _playwright_visit(
 
         print(f"[session] Browser -> OAuth ({event_url[:70]}...)")
         _browser_goto(page, login_url)
+        if _page_looks_hard_blocked(page):
+            print("[session] DataDome hard-block on idmSso login — clearing cookie and retrying once")
+            _clear_datadome_cookies(context)
+            _browser_goto(page, HOME_URL)
+            if not _wait_past_datadome(page, time.time() + DATADOME_BOOTSTRAP_SEC):
+                context.close()
+                return {}, (
+                    "DataDome hard-block on idmSso/auth (HTTP 406). "
+                    "Wipe that bot's .lfc/accounts/<id>/ folder and clear Brave cookies for liverpoolfc.com"
+                )
+            _browser_goto(page, login_url)
+        if _page_looks_hard_blocked(page) or "chrome-error://" in (page.url or ""):
+            context.close()
+            return {}, (
+                "DataDome hard-block on idmSso/auth (HTTP 406). "
+                "IP or profile is flagged — wipe that bot's .lfc/accounts/<id>/ folder, "
+                "clear liverpoolfc.com cookies, wait, retry."
+            )
         _dismiss_cookie_banner(page)
         if _on_profile_signin(page.url):
             _attempt_profile_login(page, credentials)
 
+        # Initial acquire uses the category URL; match scans use /events/...
+        # OAuth navigation already finished by the time we enter the wait loop —
+        # do NOT require seeing idmSso in the URL again or we sit forever.
+        target_is_event = "/events/" in urllib.parse.urlparse(event_url).path.lower()
+        allow_category = not target_is_event
+        oauth_done = True
+
         deadline = time.time() + BROWSER_SESSION_DEADLINE_SEC
         login_failures = 0
         last_log = 0.0
+        forced_event = False
 
         while time.time() < deadline:
-            if _browser_session_ready(context, page):
+            try:
+                url = page.url
+            except Exception:
+                page.wait_for_timeout(400)
+                continue
+
+            if "dd_referrer" in url.lower():
+                print("[session] DataDome bounce (dd_referrer) — waiting…")
+                try_solve_datadome_challenge(page)
+                page.wait_for_timeout(2000)
+                continue
+
+            from lfc.queue_it import is_queue_it_url, wait_out_queue_it
+
+            if is_queue_it_url(url):
+                print("[session] Queue-it waiting room detected — sitting in browser…")
+                ok_q, qstatus = wait_out_queue_it(page)
+                if not ok_q:
+                    context.close()
+                    return {}, qstatus.detail or "queue-it timeout"
+                print(f"[session] Queue-it cleared -> {page.url[:90]}")
+                continue
+
+            if _browser_session_ready(
+                context, page, allow_category=allow_category and oauth_done
+            ):
                 print("[session] Browser session validated — closing")
                 break
+
+            # After OAuth, if we need a specific event and only landed on category,
+            # open the event once (never re-open the same category URL forever).
+            if (
+                oauth_done
+                and target_is_event
+                and not forced_event
+                and "/categories/" in url
+                and "dd_referrer" not in url.lower()
+                and not _on_profile_signin(url)
+            ):
+                print("[session] On category after OAuth — opening event once…")
+                forced_event = True
+                _browser_goto(page, event_url)
+                page.wait_for_timeout(1000)
+                continue
 
             _dismiss_cookie_banner(page)
 
@@ -576,6 +717,7 @@ def _playwright_visit(
             try:
                 url = page.url
                 html = page.content()
+                jar = {c["name"]: c["value"] for c in context.cookies()}
             except Exception:
                 page.wait_for_timeout(400)
                 continue
@@ -587,7 +729,12 @@ def _playwright_visit(
 
             if _on_profile_signin(url):
                 if login_failures < 2 and _attempt_profile_login(page, credentials):
-                    if _wait_browser_session_ready(context, page, timeout_sec=50.0):
+                    if _wait_browser_session_ready(
+                        context,
+                        page,
+                        timeout_sec=50.0,
+                        allow_category=allow_category,
+                    ):
                         print("[session] Browser session validated — closing")
                         break
                     page.wait_for_timeout(800)
@@ -599,7 +746,11 @@ def _playwright_visit(
                 continue
 
             if time.time() - last_log >= 8:
-                print(f"[session] OAuth in progress: {url[:90]}")
+                usable, why = session_cookies_usable(jar)
+                print(
+                    f"[session] Waiting for session cookies "
+                    f"(url={url[:70]}… usable={usable}/{why} html={len(html)})"
+                )
                 last_log = time.time()
 
             if "idmSso" in url or "profile.liverpoolfc.com" in url:
@@ -619,6 +770,65 @@ def _playwright_visit(
     if _jwt_expired(jar):
         return jar, "swapi_auth still expired after browser visit"
     return jar, "ok"
+
+
+def playwright_wait_queue(
+    url: str,
+    *,
+    profile_dir: Path = DEFAULT_PROFILE_DIR,
+    credentials: dict[str, Any] | None = None,
+    timeout_sec: float = 6 * 60 * 60,
+) -> SessionRefreshResult:
+    """Open Chromium, navigate to url, sit in Queue-it until ticketing returns."""
+    from playwright.sync_api import sync_playwright
+
+    from lfc.queue_it import detect_queue_it, is_queue_it_url, wait_out_queue_it
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        launch_kwargs: dict = {
+            "headless": False,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--no-proxy-server",
+            ],
+        }
+        try:
+            context = p.chromium.launch_persistent_context(
+                str(profile_dir),
+                channel="chrome",
+                **launch_kwargs,
+            )
+        except Exception:
+            context = p.chromium.launch_persistent_context(
+                str(profile_dir),
+                **launch_kwargs,
+            )
+        page = context.pages[0] if context.pages else context.new_page()
+        print(f"[queue-it] Browser -> {url[:90]}")
+        _browser_goto(page, url)
+        try:
+            cur = page.url
+            html = page.content()
+        except Exception:
+            cur, html = url, ""
+        status = detect_queue_it(url=url, html=html, final_url=cur)
+        if not status.in_queue and not is_queue_it_url(cur):
+            jar = {c["name"]: c["value"] for c in context.cookies()}
+            context.close()
+            return SessionRefreshResult(True, jar, "not in queue", "queue-it")
+
+        print(
+            f"[queue-it] In waiting room {status.waiting_room_id or '?'} "
+            f"(challenge={status.challenge_type or 'n/a'}) — leave window open"
+        )
+        ok, status = wait_out_queue_it(page, timeout_sec=timeout_sec)
+        jar = {c["name"]: c["value"] for c in context.cookies()}
+        context.close()
+        if not ok:
+            return SessionRefreshResult(False, jar, status.detail, "queue-it")
+        save_session_file(jar, DEFAULT_SESSION_FILE)
+        return SessionRefreshResult(True, jar, "queue cleared", "queue-it")
 
 
 def playwright_acquire_session(

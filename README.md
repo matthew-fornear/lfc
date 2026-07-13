@@ -108,9 +108,20 @@ lfc_checkout_password=somepassword
 lfc_proxy=http://user:pass@host:port   # optional, curl_cffi only
 ```
 
+### Bots dashboard (people + ticket counts)
+
+Double-click `bots.bat`.
+
+1. Add people, set how many tickets each needs (1–4), click **Save**.
+2. Click **Start bot** (opens a second window for the bot).
+3. Use **Stop bot** when you want it to stop.
+4. Leave the first black window open while you use the page.
+
 ---
 
 ## Run
+
+Same as **Start bot** on the dashboard, or:
 
 ```powershell
 .\start.ps1
@@ -134,8 +145,9 @@ On first run a Chrome window opens for login. After that the session is cached a
 If DataDome blocks the browser (shows "Access is temporarily restricted"):
 
 ```powershell
-Remove-Item -Recurse -Force .lfc\browser_profile
-Remove-Item -Force .lfc\session.json
+Remove-Item -Recurse -Force .lfc\accounts
 ```
 
-Then clear the `datadome` cookie from your real browser for `ticketing.liverpoolfc.com` (DevTools > Application > Cookies), and run `.\start.ps1` again.
+Each bot has its own folder under `.lfc/accounts/<id>/browser_profile`. Deleting `.lfc\accounts` resets all of them.
+
+Then clear the `datadome` cookie from your real browser for `ticketing.liverpoolfc.com` (DevTools > Application > Cookies), and run again.

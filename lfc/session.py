@@ -12,7 +12,7 @@ from curl_cffi import requests
 
 
 def _get_proxy_dict() -> dict | None:
-    p = os.environ.get("lfc_proxy") or os.environ.get("LFC_PROXY")
+    p = (os.environ.get("lfc_proxy") or os.environ.get("LFC_PROXY") or "").strip()
     if not p:
         return None
     return {"http": p, "https": p}
@@ -222,16 +222,39 @@ class LFCClient:
         for name, value in r.cookies.items():
             self.cookies[name] = value
 
+    def get_event_page(self, url: str) -> tuple[int, str]:
+        r = self.session.get(
+            url, headers=DEFAULT_HEADERS, cookies=self.cookies, timeout=30
+        )
+        self._merge_response_cookies(r)
+        return r.status_code, r.text
+
+    def fetch_page(self, url: str) -> tuple[int, str, str]:
+        """GET page and return (status, html, final_url) after redirects."""
+        r = self.session.get(
+            url, headers=DEFAULT_HEADERS, cookies=self.cookies, timeout=30
+        )
+        self._merge_response_cookies(r)
+        return r.status_code, r.text, str(r.url)
+
     def validate_event_access(self, url: str) -> tuple[bool, str, str]:
         """
         Returns (ok, html_or_error, detail).
         ok requires HTTP 200, productId in HTML, and page large enough to be real event data.
+        detail may be ``queue-it:<room>`` when redirected into a waiting room.
         """
+        from lfc.queue_it import detect_queue_it
+
         diag = session_diagnostics(self.cookies)
         if not diag.ok:
             return False, "", "; ".join(diag.issues)
 
-        status, html = self.get_event_page(url)
+        status, html, final_url = self.fetch_page(url)
+        queue = detect_queue_it(url=url, html=html, final_url=final_url)
+        if queue.in_queue:
+            room = queue.waiting_room_id or "unknown"
+            return False, html, f"queue-it:{room}"
+
         if status != 200:
             return False, "", f"HTTP {status} loading event page (DataDome block or network error)"
 
@@ -252,11 +275,18 @@ class LFCClient:
 
     def validate_category_access(self, url: str) -> tuple[bool, str, str]:
         """Category / calendar pages — session cookies, not productId."""
+        from lfc.queue_it import detect_queue_it
+
         ok, detail = session_cookies_usable(self.cookies)
         if not ok:
             return False, "", detail
 
-        status, html = self.get_event_page(url)
+        status, html, final_url = self.fetch_page(url)
+        queue = detect_queue_it(url=url, html=html, final_url=final_url)
+        if queue.in_queue:
+            room = queue.waiting_room_id or "unknown"
+            return False, html, f"queue-it:{room}"
+
         if status != 200:
             return False, "", f"HTTP {status} loading category page"
 
@@ -272,13 +302,6 @@ class LFCClient:
         if is_category_url(url):
             return self.validate_category_access(url)
         return self.validate_event_access(url)
-
-    def get_event_page(self, url: str) -> tuple[int, str]:
-        r = self.session.get(
-            url, headers=DEFAULT_HEADERS, cookies=self.cookies, timeout=30
-        )
-        self._merge_response_cookies(r)
-        return r.status_code, r.text
 
     def get_area_page(self, event_url: str, area_guid: str, *, sb2m: bool = False) -> tuple[int, str]:
         parsed = urllib.parse.urlparse(event_url)

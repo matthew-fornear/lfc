@@ -43,6 +43,46 @@ def _format_found_section(
     )
 
 
+def format_singles_only(
+    event_name: str,
+    *,
+    event_datetime: str = "",
+    event_url: str = "",
+    total_available: int,
+    largest_together: int,
+    area_notes: list[tuple[str, int, int]] | None = None,
+    want_together: int = 2,
+    refresh_seconds: float = 1800.0,
+) -> str:
+    """Stock exists, but nothing consecutive enough (e.g. only singles)."""
+    when = f" ({event_datetime})" if event_datetime else ""
+    lines = [f"{event_name.upper()}{when}"]
+    if event_url:
+        lines.append(event_url)
+
+    if want_together <= 1:
+        need = "need 1"
+    else:
+        need = f"need {want_together}+ together"
+    lines.append(
+        f"{total_available} seats available but only singles / broken blocks "
+        f"(largest together: {largest_together}, {need})"
+    )
+    if area_notes:
+        bits = [
+            f"{name}: {avail} avail (largest together: {largest})"
+            for name, avail, largest in area_notes[:8]
+            if avail > 0
+        ]
+        if bits:
+            lines.append("areas: " + "; ".join(bits))
+            if len(area_notes) > 8:
+                lines.append(f"+{len(area_notes) - 8} more areas")
+
+    lines.append(_refresh_phrase(refresh_seconds) + ".")
+    return "\n".join(lines)
+
+
 def format_event_update(
     event_name: str,
     *,

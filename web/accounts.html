@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bots</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #141414;
+      --muted: #5c5c5c;
+      --line: #d8d4cc;
+      --panel: #fffcf7;
+      --accent: #c8102e;
+      --ok: #1f6b3a;
+      --font: "IBM Plex Sans", system-ui, sans-serif;
+      --display: "Syne", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--font);
+      color: var(--ink);
+      background: #ece7db;
+      padding: 1.5rem 1rem 3rem;
+    }
+    .wrap { width: min(640px, 100%); margin: 0 auto; }
+    h1 {
+      font-family: var(--display);
+      font-size: 2rem;
+      margin: 0 0 0.35rem;
+    }
+    .help {
+      color: var(--muted);
+      margin: 0 0 1.25rem;
+      line-height: 1.4;
+    }
+    .runbox {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+      display: grid;
+      gap: 0.75rem;
+    }
+    .runbox .title {
+      font-family: var(--display);
+      font-weight: 700;
+      font-size: 1.15rem;
+    }
+    .state {
+      font-weight: 700;
+    }
+    .state.on { color: var(--ok); }
+    .state.off { color: var(--muted); }
+    .bar {
+      display: flex;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+    }
+    button {
+      font: inherit;
+      font-weight: 600;
+      border: 0;
+      border-radius: 999px;
+      padding: 0.75rem 1.15rem;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .run { background: var(--ok); color: #fff; font-size: 1.1rem; padding: 0.9rem 1.4rem; }
+    .stop { background: var(--accent); color: #fff; font-size: 1.1rem; padding: 0.9rem 1.4rem; }
+    .big { background: var(--ink); color: #fff; font-size: 1.05rem; }
+    .add { background: #fff; border: 1px solid var(--line); }
+    .danger { background: #fff; color: var(--accent); border: 1px solid rgba(200,16,46,.35); }
+    #msg {
+      min-height: 1.4rem;
+      margin-bottom: 0.85rem;
+      font-weight: 600;
+    }
+    #msg.ok { color: var(--ok); }
+    #msg.err { color: var(--accent); }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 1rem;
+      margin-bottom: 0.85rem;
+      display: grid;
+      gap: 0.7rem;
+    }
+    .card h2 { margin: 0; font-size: 1.1rem; }
+    label {
+      display: grid;
+      gap: 0.3rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    input, select {
+      font: inherit;
+      font-weight: 500;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.7rem 0.75rem;
+      width: 100%;
+      background: #fff;
+    }
+    .seats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.4rem;
+    }
+    .seats label { gap: 0; }
+    .seats input { position: absolute; opacity: 0; pointer-events: none; }
+    .seats span {
+      display: grid;
+      place-items: center;
+      padding: 0.75rem 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      font-weight: 700;
+      font-size: 1.1rem;
+      cursor: pointer;
+    }
+    .seats input:checked + span {
+      background: var(--ink);
+      border-color: var(--ink);
+      color: #fff;
+    }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+    .on {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-weight: 600;
+      color: var(--ink);
+      font-size: 0.95rem;
+    }
+    .on input { width: auto; accent-color: var(--accent); }
+    .empty {
+      border: 1px dashed var(--line);
+      border-radius: 14px;
+      padding: 2rem 1rem;
+      text-align: center;
+      color: var(--muted);
+      background: rgba(255,255,255,.45);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Bots</h1>
+    <p class="help">
+      1) Add people and click <b>Save</b>.<br />
+      2) Set tickets (1–4) and optional stand (Kop, Main Stand, etc).<br />
+      3) Click <b>Start bot</b>. A new window opens — that is the bot running.<br />
+      Leave the black window open while you use this page.
+    </p>
+
+    <div class="runbox">
+      <div class="title">Bot</div>
+      <div id="botState" class="state off">Off</div>
+      <div class="bar" style="margin:0">
+        <button type="button" class="run" id="startBot">Start bot</button>
+        <button type="button" class="stop" id="stopBot" disabled>Stop bot</button>
+      </div>
+    </div>
+
+    <div id="msg"></div>
+
+    <div class="bar">
+      <button type="button" class="big" id="save">Save</button>
+      <button type="button" class="add" id="add">+ Add person</button>
+    </div>
+
+    <div id="list"></div>
+  </div>
+
+  <script>
+    let accounts = [];
+
+    const list = document.getElementById("list");
+    const msg = document.getElementById("msg");
+    const botState = document.getElementById("botState");
+    const startBtn = document.getElementById("startBot");
+    const stopBtn = document.getElementById("stopBot");
+
+    function say(text, kind = "") {
+      msg.textContent = text;
+      msg.className = kind;
+    }
+
+    function id() {
+      return crypto.randomUUID ? crypto.randomUUID() : "a-" + Date.now();
+    }
+
+    function blank() {
+      return {
+        id: id(),
+        label: "",
+        email: "",
+        password: "",
+        club: "liverpool",
+        desired_quantity: 2,
+        stand: "",
+        enabled: true,
+      };
+    }
+
+    function esc(v) {
+      return String(v ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("<", "&lt;");
+    }
+
+    function fromCard(card) {
+      const id = card.dataset.id;
+      const qty = card.querySelector('input[name="q-' + id + '"]:checked');
+      return {
+        id,
+        label: card.querySelector(".name").value.trim(),
+        email: card.querySelector(".email").value.trim(),
+        password: card.querySelector(".pass").value,
+        club: card.querySelector(".club").value,
+        desired_quantity: Number(qty ? qty.value : 2),
+        stand: card.querySelector(".stand").value.trim(),
+        enabled: card.querySelector(".enabled").checked,
+      };
+    }
+
+    function gather() {
+      return Array.from(list.querySelectorAll(".card")).map(fromCard);
+    }
+
+    function setBotUi(running) {
+      botState.textContent = running ? "Running" : "Off";
+      botState.className = "state " + (running ? "on" : "off");
+      startBtn.disabled = running;
+      stopBtn.disabled = !running;
+    }
+
+    async function refreshBot() {
+      try {
+        const res = await fetch("/api/bot");
+        const data = await res.json();
+        setBotUi(!!data.running);
+      } catch {
+        setBotUi(false);
+      }
+    }
+
+    function draw() {
+      if (!accounts.length) {
+        list.innerHTML = '<div class="empty">Nobody added yet. Click <b>+ Add person</b>.</div>';
+        return;
+      }
+
+      list.innerHTML = accounts.map((a, i) => {
+        const q = Number(a.desired_quantity) || 2;
+        const seats = [1, 2, 3, 4].map((n) => `
+          <label>
+            <input type="radio" name="q-${a.id}" value="${n}" ${n === q ? "checked" : ""} />
+            <span>${n}</span>
+          </label>
+        `).join("");
+
+        return `
+          <div class="card" data-id="${a.id}">
+            <div class="row">
+              <h2>Person ${i + 1}</h2>
+              <label class="on">
+                <input class="enabled" type="checkbox" ${a.enabled ? "checked" : ""} />
+                On
+              </label>
+            </div>
+            <label>Name (example: Adam 1)
+              <input class="name" value="${esc(a.label)}" placeholder="Adam 1" />
+            </label>
+            <label>Club
+              <select class="club">
+                <option value="liverpool" ${a.club === "liverpool" ? "selected" : ""}>Liverpool</option>
+                <option value="arsenal" ${a.club === "arsenal" ? "selected" : ""}>Arsenal</option>
+              </select>
+            </label>
+            <label>Email
+              <input class="email" type="email" value="${esc(a.email)}" placeholder="email@example.com" />
+            </label>
+            <label>Password
+              <input class="pass" type="password" value="${esc(a.password)}" placeholder="password" />
+            </label>
+            <label>How many tickets?
+              <div class="seats">${seats}</div>
+            </label>
+            <label>Stand (optional)
+              <input class="stand" list="stands-${a.id}" value="${esc(a.stand || "")}"
+                placeholder="Leave blank for any stand. Example: Kop" />
+              <datalist id="stands-${a.id}">
+                <option value="Kop"></option>
+                <option value="Main Stand"></option>
+                <option value="Anfield Road"></option>
+                <option value="Sir Kenny Dalglish"></option>
+                <option value="Upper Centenary"></option>
+                <option value="Lower Centenary"></option>
+              </datalist>
+            </label>
+            <div class="row">
+              <span></span>
+              <button type="button" class="danger" data-del="${a.id}">Remove</button>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      list.querySelectorAll("[data-del]").forEach((btn) => {
+        btn.onclick = () => {
+          accounts = gather().filter((a) => a.id !== btn.dataset.del);
+          draw();
+          say("Removed. Click Save.");
+        };
+      });
+    }
+
+    async function load() {
+      say("Loading…");
+      const res = await fetch("/api/accounts");
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        say(data.error || ("Could not load (" + res.status + "). Close all black windows and double-click bots.bat again."), "err");
+        return;
+      }
+      const data = await res.json();
+      accounts = data.accounts || [];
+      draw();
+      await refreshBot();
+      say(accounts.length ? "Ready." : "Add your first person.", "ok");
+    }
+
+    async function save() {
+      accounts = gather();
+      for (const a of accounts) {
+        if (!a.label) { say("Every person needs a name.", "err"); return false; }
+        if (!a.email) { say("Every person needs an email.", "err"); return false; }
+      }
+      say("Saving…");
+      const res = await fetch("/api/accounts", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accounts }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        say(data.error || "Save failed.", "err");
+        return false;
+      }
+      accounts = data.accounts || accounts;
+      draw();
+      say("Saved.", "ok");
+      return true;
+    }
+
+    document.getElementById("add").onclick = () => {
+      accounts = gather();
+      accounts.push(blank());
+      draw();
+      const last = list.querySelector(".card:last-of-type .name");
+      if (last) last.focus();
+      say("Fill this in, then click Save.");
+    };
+
+    document.getElementById("save").onclick = () => { save(); };
+
+    startBtn.onclick = async () => {
+      const ok = await save();
+      if (ok === false && accounts.length) return;
+      say("Starting bot…");
+      const res = await fetch("/api/bot/start", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        say(
+          data.error ||
+            "Could not start. Close all black windows and double-click bots.bat again.",
+          "err"
+        );
+        return;
+      }
+      setBotUi(true);
+      say(data.message || "Bot started.", "ok");
+    };
+
+    stopBtn.onclick = async () => {
+      say("Stopping bot…");
+      const res = await fetch("/api/bot/stop", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        say(data.error || "Could not stop bot.", "err");
+        return;
+      }
+      setBotUi(false);
+      say(data.message || "Bot stopped.", "ok");
+    };
+
+    setInterval(refreshBot, 3000);
+    load().catch(() =>
+      say("Could not load. Close everything and double-click bots.bat again.", "err")
+    );
+  </script>
+</body>
+</html>

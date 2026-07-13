@@ -54,12 +54,14 @@ def acquire_client(
     requests_txt: Path | None = None,
     impersonate: str = "chrome146",
     credentials: dict[str, Any] | None = None,
+    session_file: Path | None = None,
+    profile_dir: Path | None = None,
 ) -> tuple[LFCClient, str]:
     """Automated session — opens browser automatically when cookies are stale."""
     result = ensure_session(
         event_url,
-        session_file=DEFAULT_SESSION_FILE,
-        profile_dir=DEFAULT_PROFILE_DIR,
+        session_file=session_file or DEFAULT_SESSION_FILE,
+        profile_dir=profile_dir or DEFAULT_PROFILE_DIR,
         credentials=credentials,
         requests_txt=requests_txt,
         impersonate=impersonate,

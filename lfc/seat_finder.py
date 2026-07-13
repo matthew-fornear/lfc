@@ -194,15 +194,29 @@ def pick_areas_for_quantity(
     areas: list,
     quantity: int,
     prefer_names: list[str] | None = None,
+    *,
+    only_preferred: bool = False,
 ) -> list:
-    """Areas from eventPricing with enough tickets for the requested block size."""
-    prefer = {n.lower() for n in (prefer_names or [])}
+    """Areas from eventPricing with enough tickets for the requested block size.
+
+    prefer_names: stand/area names (substring match, case-insensitive).
+    only_preferred: if True, skip all other stands when prefer_names is set.
+    """
+    prefer = [n.strip().lower() for n in (prefer_names or []) if n and n.strip()]
     eligible = [a for a in areas if a.availability >= quantity]
-    if prefer:
-        preferred = [a for a in eligible if a.name.lower() in prefer]
-        rest = [a for a in eligible if a.name.lower() not in prefer]
-        return preferred + rest
-    return eligible
+
+    def matches(area_name: str) -> bool:
+        n = area_name.lower()
+        return any(p == n or p in n or n in p for p in prefer)
+
+    if not prefer:
+        return eligible
+
+    preferred = [a for a in eligible if matches(a.name)]
+    if only_preferred:
+        return preferred
+    rest = [a for a in eligible if not matches(a.name)]
+    return preferred + rest
 
 
 def demo_from_capture(capture_html: Path, quantity: int = 2) -> None:

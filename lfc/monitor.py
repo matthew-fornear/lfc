@@ -17,6 +17,7 @@ import threading
 import time
 from pathlib import Path
 
+from lfc.accounts import BotAccount, resolve_bot_accounts
 from lfc.auth import acquire_client, event_url_from_requests_txt, normalize_event_url
 from lfc.cart import build_cart_plan, execute_cart_plan
 from lfc.checkout import open_checkout_browser
@@ -29,20 +30,27 @@ from lfc.pricing import parse_event_pricing_blob
 from lfc.scanner import pick_best_opportunity, scan_consecutive_blocks
 from lfc.session import LFCClient
 from lfc.session_manager import ensure_session
-from lfc.session_manager import DEFAULT_SESSION_FILE, DEFAULT_PROFILE_DIR
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from discord.messages import format_event_update
+from discord.messages import format_event_update, format_singles_only
 from discord.notify import DiscordNotifier, merge_discord_settings
 
 BOOTSTRAP_URL = "https://ticketing.liverpoolfc.com/en-GB/categories/home-tickets"
 
 
-def _session_creds(cfg: MonitorConfig) -> dict:
+def _session_creds(cfg: MonitorConfig, account: BotAccount | None = None) -> dict:
+    if account:
+        return account.credentials()
     return {"email": cfg.lfc_email, "password": cfg.lfc_password}
+
+
+def _prefer_areas(cfg: MonitorConfig, account: BotAccount | None = None) -> list[str] | None:
+    if account and account.stand:
+        return [account.stand]
+    return cfg.prefer_areas or None
 
 
 def _discord_notifier(cfg: MonitorConfig) -> DiscordNotifier:
@@ -95,51 +103,161 @@ def resolve_event_url(cfg: MonitorConfig, client: LFCClient, requests_path: Path
     return urls[0]
 
 
-def scan_once(client: LFCClient, cfg: MonitorConfig, event_url: str) -> bool:
+def _event_label(event_url: str) -> str:
+    path = event_url.split("?", 1)[0].rstrip("/")
+    parts = [p for p in path.split("/") if p]
+    return parts[-1] if parts else "event"
+
+
+def scan_once(
+    client: LFCClient,
+    cfg: MonitorConfig,
+    event_url: str,
+    *,
+    account: BotAccount | None = None,
+) -> bool:
     """One poll cycle for a single match. Returns True if a cart succeeded."""
+    from lfc.queue_it import detect_queue_it, format_queue_discord
+    from lfc.session_manager import playwright_wait_queue
+
+    session_file = account.session_file if account else None
+    profile_dir = account.profile_dir if account else None
+    creds = _session_creds(cfg, account)
+    prefer = _prefer_areas(cfg, account)
+    want = account.desired_quantity if account else 2
+    min_seats = want
+    max_seats = want
+    tag = f"[{account.label}] " if account else ""
+
     discord = _discord_notifier(cfg)
     ok, html, detail = client.validate_event_access(event_url)
-    if not ok:
-        print(f"poll: session stale — {detail}; refreshing…")
+    if not ok and detail.startswith("queue-it:"):
+        queue = detect_queue_it(url=event_url, html=html, final_url="")
+        if not queue.waiting_room_id and ":" in detail:
+            queue.waiting_room_id = detail.split(":", 1)[1]
+        print(f"{tag}poll: Queue-it waiting room ({queue.waiting_room_id or '?'})")
+        discord.send(
+            format_queue_discord(queue, event_label=_event_label(event_url), phase="entered")
+        )
+        cleared = playwright_wait_queue(
+            event_url,
+            profile_dir=profile_dir,
+            credentials=creds,
+        )
+        if not cleared.ok:
+            print(f"{tag}poll: queue wait FAILED — {cleared.detail}")
+            return False
+        client.cookies.update(cleared.cookies)
+        discord.send(
+            format_queue_discord(queue, event_label=_event_label(event_url), phase="cleared")
+        )
+        ok, html, detail = client.validate_event_access(event_url)
+        if not ok:
+            print(f"{tag}poll: still cannot access event after queue — {detail}")
+            return False
+        print(f"{tag}poll: queue cleared — continuing scan")
+
+    elif not ok:
+        print(f"{tag}poll: session stale — {detail}; refreshing…")
+        from lfc.session_manager import DEFAULT_PROFILE_DIR, DEFAULT_SESSION_FILE
+
         refreshed = ensure_session(
             event_url,
-            session_file=DEFAULT_SESSION_FILE,
-            profile_dir=DEFAULT_PROFILE_DIR,
-            credentials=_session_creds(cfg),
+            session_file=session_file or DEFAULT_SESSION_FILE,
+            profile_dir=profile_dir or DEFAULT_PROFILE_DIR,
+            credentials=creds,
             requests_txt=Path(cfg.requests_txt) if cfg.requests_txt else None,
             impersonate=cfg.impersonate,
         )
         if not refreshed.ok:
-            print(f"poll: session refresh FAILED — {refreshed.detail}")
+            print(f"{tag}poll: session refresh FAILED — {refreshed.detail}")
             return False
         client.cookies.update(refreshed.cookies)
         ok, html, detail = client.validate_event_access(event_url)
-        if not ok:
-            print(f"poll: still cannot access event — {detail}")
+        if not ok and detail.startswith("queue-it:"):
+            queue = detect_queue_it(url=event_url, html=html, final_url="")
+            if not queue.waiting_room_id and ":" in detail:
+                queue.waiting_room_id = detail.split(":", 1)[1]
+            print(f"{tag}poll: Queue-it after refresh ({queue.waiting_room_id or '?'})")
+            discord.send(
+                format_queue_discord(
+                    queue, event_label=_event_label(event_url), phase="entered"
+                )
+            )
+            cleared = playwright_wait_queue(
+                event_url,
+                profile_dir=profile_dir,
+                credentials=creds,
+            )
+            if not cleared.ok:
+                print(f"{tag}poll: queue wait FAILED — {cleared.detail}")
+                return False
+            client.cookies.update(cleared.cookies)
+            discord.send(
+                format_queue_discord(
+                    queue, event_label=_event_label(event_url), phase="cleared"
+                )
+            )
+            ok, html, detail = client.validate_event_access(event_url)
+            if not ok:
+                print(f"{tag}poll: still cannot access event after queue — {detail}")
+                return False
+            print(f"{tag}poll: queue cleared — continuing scan")
+        elif not ok:
+            print(f"{tag}poll: still cannot access event — {detail}")
             return False
-        print(f"poll: session refreshed via {refreshed.method}")
+        else:
+            print(f"{tag}poll: session refreshed via {refreshed.method}")
 
     event = parse_event_page(html, source_path=client._source_path(event_url))
     pricing = parse_event_pricing_blob(html)
     label = event.display_name or event.title
-    print(f"poll: {label!r} ({len(event.areas)} areas with stock)")
+    print(
+        f"{tag}poll: {label!r} ({len(event.areas)} areas with stock) "
+        f"want {want} together"
+    )
 
-    opportunities, logs = scan_consecutive_blocks(
+    scan = scan_consecutive_blocks(
         client,
         event,
         pricing,
         price_type_name=cfg.price_type_name,
         price_level_name=cfg.price_level_name,
-        prefer_areas=cfg.prefer_areas or None,
+        prefer_areas=prefer,
         max_areas_to_scan=cfg.max_areas_to_scan,
+        min_seats=min_seats,
+        max_seats=max_seats,
     )
-    for line in logs:
-        print(f"  scan: {line}")
+    for line in scan.logs:
+        print(f"  {tag}scan: {line}")
 
-    if not opportunities:
-        print("poll: no consecutive blocks of 2–4 found this cycle")
+    if not scan.opportunities:
+        if scan.has_stock_but_no_block:
+            print(
+                f"{tag}poll: {scan.total_available} seats available but no consecutive "
+                f"block of {want} (largest together: {scan.largest_together})"
+            )
+            msg = format_singles_only(
+                event.display_name or event.title,
+                event_datetime=event.event_datetime,
+                event_url=event_url,
+                total_available=scan.total_available,
+                largest_together=scan.largest_together,
+                area_notes=[
+                    (n.area_name, n.available, n.largest_together)
+                    for n in scan.area_notes
+                ],
+                want_together=want,
+                refresh_seconds=cfg.refresh_seconds,
+            )
+            print(f"  {tag}discord: {msg[:220]}{'…' if len(msg) > 220 else ''}")
+            if not discord.send(msg):
+                print(f"  {tag}discord: FAILED to send singles-only update")
+        else:
+            print(f"{tag}poll: no consecutive block of {want} found this cycle")
         return False
 
+    opportunities = scan.opportunities
     seat_groups = [opp.seat_group for opp in opportunities]
 
     opp = pick_best_opportunity(opportunities)
@@ -148,7 +266,7 @@ def scan_once(client: LFCClient, cfg: MonitorConfig, event_url: str) -> bool:
 
     qty = len(opp.seat_group.seats)
     plan = build_cart_plan(client, event=event, event_url=event_url, opportunity=opp)
-    print(f"  cart: attempting {opp.area.name} — {opp.seat_group.label}")
+    print(f"  {tag}cart: attempting {opp.area.name} — {opp.seat_group.label}")
 
     result = execute_cart_plan(client, plan, expected_quantity=qty)
     handoff_url: str | None = None
@@ -157,12 +275,12 @@ def scan_once(client: LFCClient, cfg: MonitorConfig, event_url: str) -> bool:
 
     if not result.success:
         cart_error = result.error or "unknown error"
-        print(f"  cart: FAILED — {cart_error}")
+        print(f"  {tag}cart: FAILED — {cart_error}")
         if result.basket:
-            print(f"  basket: count={result.basket.count} raw={result.basket.raw!r}")
+            print(f"  {tag}basket: count={result.basket.count} raw={result.basket.raw!r}")
         if result.api_body:
             print(
-                f"  api: {json.dumps(result.api_body)[:400] if isinstance(result.api_body, dict) else result.api_body}"
+                f"  {tag}api: {json.dumps(result.api_body)[:400] if isinstance(result.api_body, dict) else result.api_body}"
             )
     else:
         if cfg.checkout_handoff_enabled:
@@ -174,19 +292,24 @@ def scan_once(client: LFCClient, cfg: MonitorConfig, event_url: str) -> bool:
                     port=cfg.checkout_handoff_port,
                 )
             except ValueError as exc:
-                print(f"  handoff: {exc}")
-        print(f"  cart: SUCCESS basket={result.basket.count} checkout={result.checkout_detail}")
+                print(f"  {tag}handoff: {exc}")
+        print(
+            f"  {tag}cart: SUCCESS basket={result.basket.count} "
+            f"checkout={result.checkout_detail}"
+        )
 
         if cfg.open_browser_on_cart:
             threading.Thread(
                 target=open_checkout_browser,
                 args=(client, plan.checkout_url),
+                kwargs={"profile_dir": profile_dir} if profile_dir else {},
                 daemon=True,
             ).start()
-            print("  browser: opening checkout in background (monitor keeps running)")
+            print(f"  {tag}browser: opening checkout in background (monitor keeps running)")
 
+    who = f"{account.label}: " if account else ""
     msg = format_event_update(
-        event.display_name or event.title,
+        f"{who}{event.display_name or event.title}",
         event_datetime=event.event_datetime,
         event_url=event_url,
         seat_groups=seat_groups,
@@ -199,12 +322,11 @@ def scan_once(client: LFCClient, cfg: MonitorConfig, event_url: str) -> bool:
         checkout_url=handoff_url,
         checkout_password=handoff_password,
     )
-    print(f"  discord: {msg[:220]}{'…' if len(msg) > 220 else ''}")
+    print(f"  {tag}discord: {msg[:220]}{'…' if len(msg) > 220 else ''}")
     if not discord.send(msg):
-        print("  discord: FAILED to send event update")
+        print(f"  {tag}discord: FAILED to send event update")
 
     return result.success
-
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="LFC Scenario 1 monitor")
@@ -280,18 +402,44 @@ def main() -> int:
     if manual:
         bootstrap = manual[0]
 
-    try:
-        client, method = acquire_client(
-            bootstrap,
-            requests_txt=args.requests,
-            impersonate=cfg.impersonate,
-            credentials=_session_creds(cfg),
-        )
-    except RuntimeError as exc:
-        print(f"FATAL: {exc}")
+    accounts = resolve_bot_accounts()
+    if not accounts:
+        print("FATAL: no enabled accounts — add one in bots.bat / web/accounts.json or set .env")
         return 1
 
-    print(f"session: acquired via {method}")
+    print(f"bots: {len(accounts)} account(s)")
+    for account in accounts:
+        print(
+            f"  - {account.label} ({account.email}) want={account.desired_quantity}"
+            f"{' stand=' + account.stand if account.stand else ''}"
+            f" profile={account.profile_dir}"
+        )
+
+    # Shared event URL list from the first account that can open the category page.
+    clients: dict[str, LFCClient] = {}
+    discover_client: LFCClient | None = None
+    for account in accounts:
+        try:
+            client, method = acquire_client(
+                bootstrap,
+                requests_txt=args.requests,
+                impersonate=cfg.impersonate,
+                credentials=account.credentials(),
+                session_file=account.session_file,
+                profile_dir=account.profile_dir,
+            )
+        except RuntimeError as exc:
+            print(f"FATAL [{account.label}]: {exc}")
+            continue
+        clients[account.id] = client
+        print(f"session [{account.label}]: acquired via {method}")
+        if discover_client is None:
+            discover_client = client
+
+    if not clients or discover_client is None:
+        print("FATAL: no account could establish a session")
+        return 1
+
     if cfg.checkout_handoff_enabled:
         ensure_handoff_server(
             bind=cfg.checkout_handoff_bind,
@@ -312,7 +460,8 @@ def main() -> int:
                 "checkout portal: waiting for ngrok — run `ngrok http "
                 f"{cfg.checkout_handoff_port}` (Discord links need a public URL)"
             )
-    print("Scanning for consecutive seats: 2, 3, or 4 together")
+
+    print("Each bot uses its own browser profile under .lfc/accounts/<id>/")
     print(f"Cycle interval: {cfg.refresh_seconds}s")
     if cfg.auto_discover_events and not manual:
         print("Events: auto-discover from home-tickets category")
@@ -321,7 +470,7 @@ def main() -> int:
     while True:
         try:
             event_urls = resolve_event_urls(
-                cfg, client, args.requests or Path(cfg.requests_txt or "")
+                cfg, discover_client, args.requests or Path(cfg.requests_txt or "")
             )
         except SystemExit as exc:
             print(f"FATAL: {exc}")
@@ -332,21 +481,26 @@ def main() -> int:
             time.sleep(60)
             continue
 
-        print(f"\n=== cycle: {len(event_urls)} match(es) ===")
+        print(f"\n=== cycle: {len(event_urls)} match(es) × {len(clients)} bot(s) ===")
         for i, u in enumerate(event_urls, 1):
             print(f"  [{i}] {u}")
 
-        for i, event_url in enumerate(event_urls):
-            print(f"\n--- match {i + 1}/{len(event_urls)} ---")
-            try:
-                scan_once(client, cfg, event_url)
-            except KeyboardInterrupt:
-                print("\nStopped.")
-                return 0
-            except Exception as exc:
-                print(f"error: {exc}")
-            if i + 1 < len(event_urls):
-                time.sleep(cfg.inter_game_pause_seconds)
+        for account in accounts:
+            client = clients.get(account.id)
+            if not client:
+                continue
+            print(f"\n=== bot: {account.label} (want {account.desired_quantity}) ===")
+            for i, event_url in enumerate(event_urls):
+                print(f"\n--- [{account.label}] match {i + 1}/{len(event_urls)} ---")
+                try:
+                    scan_once(client, cfg, event_url, account=account)
+                except KeyboardInterrupt:
+                    print("\nStopped.")
+                    return 0
+                except Exception as exc:
+                    print(f"error [{account.label}]: {exc}")
+                if i + 1 < len(event_urls):
+                    time.sleep(cfg.inter_game_pause_seconds)
 
         if args.once:
             print("(--once) single cycle complete")

@@ -103,7 +103,7 @@ def main() -> int:
             return _fail("clear_basket", f"{detail} (count={count})")
 
     # Step 3: consecutive seat scan
-    opportunities, logs = scan_consecutive_blocks(
+    scan = scan_consecutive_blocks(
         client,
         event,
         pricing,
@@ -113,10 +113,17 @@ def main() -> int:
         max_areas_to_scan=cfg.max_areas_to_scan,
     )
     print("scan log:")
-    for line in logs:
+    for line in scan.logs:
         print(f"  {line}")
 
+    opportunities = scan.opportunities
     if not opportunities:
+        if scan.has_stock_but_no_block:
+            return _fail(
+                "consecutive_scan",
+                f"{scan.total_available} seats available but only singles / "
+                f"broken blocks (largest together: {scan.largest_together})",
+            )
         return _fail(
             "consecutive_scan",
             "no consecutive blocks of 2–4 available seats found live",

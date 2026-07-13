@@ -27,6 +27,23 @@ def is_datadome_verification_page(html: str) -> bool:
     return False
 
 
+def is_datadome_hard_block(html: str, url: str = "") -> bool:
+    """True for the 'Access is temporarily restricted' / IP ban page (often HTTP 406)."""
+    low = (html or "").lower()
+    if "access is temporarily restricted" in low:
+        return True
+    if "unusual activity from your device or network" in low:
+        return True
+    if "automated (bot) activity on your network" in low:
+        return True
+    # Tiny interstitial with only the animated #cmsg stub and no real site chrome.
+    if len(html or "") < 2_000 and "var dd=" in low and "cmsg" in low:
+        return True
+    if "chrome-error://" in (url or "").lower():
+        return True
+    return False
+
+
 def _find_slider(page: Page) -> tuple[object | None, Page | Frame]:
     """Return (slider locator, frame/page that owns it)."""
     candidates: list[tuple[object, Page | Frame]] = [
